@@ -4,7 +4,7 @@ import sys
 reload(sys)
 sys.setdefaultencoding('utf-8')
 
-import os
+import os, signal
 import threading
 import urllib2
 import subprocess
@@ -28,8 +28,8 @@ class Config(object):
 
     def __init__(self):
         self.env = {
-            'app_path': os.path.join(WORKING_DIR, 'apps'),
-            'log_path': os.path.join(WORKING_DIR, 'logs'),
+            'apps_path': os.path.join(WORKING_DIR, 'apps'),
+            'logs_path': os.path.join(WORKING_DIR, 'logs'),
             'tmp_path': os.path.join(WORKING_DIR, 'tmp'),
         }
 
@@ -77,12 +77,19 @@ class HTTPClient(object):
 class Agent(object):
     def __init__(self, name):
         self.name = name
-        self.path = os.path.join(Config.env.get('app_path'), self.name)
-        if not os.path.isdir(self.path):
-            os.makedirs(self.path)
+        self.app_path = os.path.join(Config.env.get('apps_path'), self.name)
+        self.log_path = os.path.join(Config.env.get('logs_path'), self.name)
+        self.script_file = os.path.join(self.app_path, 'start.py')
+        self.stdout_file = os.path.join(self.log_path, 'stdout.log')
+        self.stderr_file = os.path.join(self.log_path, 'stderr.log')
+        self.pid_file = os.path.join(self.log_path, 'server.pid')
+        if not os.path.isdir(self.app_path):
+            os.makedirs(self.app_path)
+        if not os.path.isdir(self.log_path):
+            os.makedirs(self.log_path)
 
     def download(self, url):
-        HTTPClient.download(url, self.path)
+        HTTPClient.download(url, self.app_path)
         # unzip
 
     def fetch(self, url):
@@ -93,15 +100,21 @@ class Agent(object):
         thread.start()
 
     def start(self, port=8080):
-        script = ''.join(os.path.join(self.path, 'start.py'))
-        cmd = ['python', script, '--port={0}'.format(port)]
-        process = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, 
-                                        stderr=subprocess.PIPE).wait()
-        out, err = process.communicate()
-        sys.stdout.write(out or err)
+        cmd = ['python', self.script_file, '--port={0}'.format(port)]
+        proc = subprocess.Popen(cmd, shell=True,
+                                stdout=open(self.stdout_file, 'w'),
+                                stderr=open(self.stderr_file, 'a'),)
+                                #preexec_fn=os.setpgrp)
+        with open(self.pid_file, 'wb') as fout:
+            fout.write(str(proc.pid))
+        proc.communicate()
 
     def stop(self):
-        pass
+        # alias kill3000="fuser -k -n tcp 3000"
+        with open(self.pid_file, 'r') as fin:
+            val = fin.read()
+            if val == '':
+                os.kill(int(val), signal.SIGTERM)
 
     def restart(self):
         self.stop()
@@ -114,7 +127,7 @@ class HTTPServer(object):
 def main(argv):
     agent = Agent('hello')
     # agent.fetch('http://static.ricoxie.com/robots.txt')
-    agent.start()
+    agent.stop()
     # import subprocess
     # p = subprocess.Popen(['ls', '-a'], stdout=subprocess.PIPE, 
     #                                    stderr=subprocess.PIPE)
