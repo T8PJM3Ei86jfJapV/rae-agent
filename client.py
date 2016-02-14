@@ -99,26 +99,33 @@ class Agent(object):
         )
         thread.start()
 
-    def start(self, port=8080):
-        cmd = ['python', self.script_file, '--port={0}'.format(port)]
+    def start(self, port):
+        kwargs = {'script': self.script_file, 'port': port}
+        cmd = 'python {0[script]} --port={0[port]}'.format(kwargs)
         proc = subprocess.Popen(cmd, shell=True,
                                 stdout=open(self.stdout_file, 'w'),
-                                stderr=open(self.stderr_file, 'a'),)
-                                #preexec_fn=os.setpgrp)
+                                stderr=open(self.stderr_file, 'a'),
+                                preexec_fn=os.setpgrp)
         with open(self.pid_file, 'wb') as fout:
             fout.write(str(proc.pid))
         proc.communicate()
 
-    def stop(self):
-        # alias kill3000="fuser -k -n tcp 3000"
+    def stop(self, port):
+        # Kill /bin/sh -c python xx --port=xx
         with open(self.pid_file, 'r') as fin:
             val = fin.read()
-            if val == '':
+            if val:
                 os.kill(int(val), signal.SIGTERM)
+        # Kill python xx --port=xx
+        cmd = 'fuser -k -n tcp {0}'.format(port)
+        proc = subprocess.Popen(cmd, shell=True)
 
-    def restart(self):
-        self.stop()
-        self.start()
+    def restart(self, port):
+    	try:
+            self.stop(port)
+        except:
+        	pass
+        self.start(port)
 
 
 class HTTPServer(object):
@@ -127,7 +134,7 @@ class HTTPServer(object):
 def main(argv):
     agent = Agent('hello')
     # agent.fetch('http://static.ricoxie.com/robots.txt')
-    agent.stop()
+    agent.restart(8080)
     # import subprocess
     # p = subprocess.Popen(['ls', '-a'], stdout=subprocess.PIPE, 
     #                                    stderr=subprocess.PIPE)
