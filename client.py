@@ -149,6 +149,26 @@ class Agent(object):
             pass
         self.start(port)
 
+    def alive(self, port):
+        ''' Check if is running
+        '''
+        pid_file = os.path.join(self.log_path, '{0}.pid'.format(port))
+
+        if os.path.isfile(pid_file):
+            with open(pid_file, 'r') as fin:
+                val = fin.read()
+                pid = int(val) if val else 0
+        else:
+            return False
+
+        try:
+            # Checking for the existence of a unix pid,
+            # it won't actually kill the process.
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+
     def execute(cls, name):
         method = getattr(cls, name)
         if not method:
@@ -157,7 +177,8 @@ class Agent(object):
 
 
 class HTTPServer(SimpleHTTPServer.SimpleHTTPRequestHandler):
-    def write(self, text):
+    def write(self, code, msg=''):
+        text = '{\"code\": \"%s\", \"msg\": \"%s\"}' % (code, msg)
         self.protocol_version = 'HTTP/1.1'
         self.send_response(200)
         self.send_header('Content-type', 'text/plain; charset=utf-8')
@@ -165,31 +186,40 @@ class HTTPServer(SimpleHTTPServer.SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(text)
 
-    def build_body(self, code=200, msg=''):
-        return '{\"code\": \"%s\", \"msg\": \"%s\"}' % (code, msg)
-
-    def well_done(self):
-        self.write(self.build_body())
-
-    def agent_handler(self, instruct):
+    def async_handler(self, instruct):
         name = instruct.get('agent_name')
         port = instruct.get('service_port')
         action = instruct.get('agent_action')
         link = instruct.get('package_link', '')
 
         agent = Agent(name)
-        if action == ('fetch'):
+        if action == 'fetch':
             agent.execute(action)(link)
         elif action in ('start', 'stop', 'restart'):
             agent.execute(action)(port)
+
+    def sync_handler(self, instruct):
+        name = instruct.get('agent_name')
+        port = instruct.get('service_port')
+        action = instruct.get('agent_action')
+        link = instruct.get('package_link', '')
+
+        agent = Agent(name)
+        if action == 'alive':
+            return agent.execute(action)(port)
+
+        return False
+
 
     def do_GET(self):
         # logging.warning("======= GET STARTED =======")
         # logging.warning(self.headers)
         # SimpleHTTPServer.SimpleHTTPRequestHandler.do_GET(self)
-        self.well_done()
+        self.write(200)
 
     def do_POST(self):
+        signalling = self.path.split('/')[-1]
+
         form = cgi.FieldStorage(
             fp=self.rfile,
             headers=self.headers,
@@ -207,12 +237,20 @@ class HTTPServer(SimpleHTTPServer.SimpleHTTPRequestHandler):
         #     'package_link': 'http://127.0.0.1/packages/hello-v1.0.zip'
         # }
 
-        try:
-           thread.start_new_thread(self.agent_handler, (instruct,))
-        except:
-           print "Error: unable to start thread"
-        
-        self.well_done()
+        if signalling == 'async':
+            try:
+                thread.start_new_thread(self.async_handler, (instruct,))
+                self.write(200)
+            except:
+                self.write(500, 'internal error: unable to start thread')
+        elif signalling == 'sync':
+            result = self.sync_handler(instruct)
+            if result is True:
+                self.write(200, 'All well!')
+            else:
+                self.write(300, 'Something bad!')
+        else:
+            self.write(404, 'Not Found!')
 
 
 def main(argv):
@@ -229,14 +267,56 @@ def main(argv):
 if __name__ == "__main__":
     sys.exit(main(sys.argv))
 
-# -----------------------------------------------------------------
-# ----------------------    Test HTTPServer   ---------------------
-# -----------------------------------------------------------------
+# -----------------------------------------------------------------------
+# -------------------------    Test HTTPServer   ------------------------
+# -----------------------------------------------------------------------
+
 # import requests
+
+# instruct = {
+#     'agent_name'  : 'hello',
+#     'service_port': '8021',
+#     'agent_action': 'fetch',
+#     'package_link': 'http://static.ricoxie.com/tmp/hello-v1.0.0.zip'
+# }
+# print requests.post("http://localhost:15100/async", data=instruct).text
+
+# instruct = {
+#     'agent_name'  : 'hello',
+#     'service_port': '8021',
+#     'agent_action': 'start',
+#     'package_link': 'http://static.ricoxie.com/tmp/hello-v1.0.0.zip'
+# }
+# print requests.post("http://localhost:15100/async", data=instruct).text
+
+# instruct = {
+#     'agent_name'  : 'hello',
+#     'service_port': '8021',
+#     'agent_action': 'restart',
+#     'package_link': 'http://static.ricoxie.com/tmp/hello-v1.0.0.zip'
+# }
+# print requests.post("http://localhost:15100/async", data=instruct).text
+
+# instruct = {
+#     'agent_name'  : 'hello',
+#     'service_port': '8021',
+#     'agent_action': 'alive',
+#     'package_link': 'http://static.ricoxie.com/tmp/hello-v1.0.0.zip'
+# }
+# print requests.post("http://localhost:15100/sync", data=instruct).text
+
 # instruct = {
 #     'agent_name'  : 'hello',
 #     'service_port': '8021',
 #     'agent_action': 'stop',
 #     'package_link': 'http://static.ricoxie.com/tmp/hello-v1.0.0.zip'
 # }
-# print requests.post("http://localhost:15100", data=instruct).text
+# print requests.post("http://localhost:15100/async", data=instruct).text
+
+# instruct = {
+#     'agent_name'  : 'hello',
+#     'service_port': '8021',
+#     'agent_action': 'alive',
+#     'package_link': 'http://static.ricoxie.com/tmp/hello-v1.0.0.zip'
+# }
+# print requests.post("http://localhost:15100/sync", data=instruct).text
