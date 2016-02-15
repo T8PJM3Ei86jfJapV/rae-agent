@@ -4,13 +4,23 @@ import sys
 reload(sys)
 sys.setdefaultencoding('utf-8')
 
-import os, signal
-import threading
-import urllib2
+import os
+import shutil
+import signal
+import thread
 import subprocess
+
+import SimpleHTTPServer
+import SocketServer
+import cgi
+import urllib2
+
+import zipfile
 
 
 WORKING_DIR = os.getcwd()
+AGENT_ADDR = ''
+AGENT_PORT = 15100
 
 
 class classproperty(object):
@@ -57,7 +67,7 @@ class HTTPClient(object):
         meta = response.info()
         file_sz = int(meta.getheaders('Content-Length')[0])
 
-        with open(os.path.join(path, filename), 'wb') as fout:
+        with open(filename, 'wb') as fout:
             down_sz = 0
             block_sz = 1024 * 4
 
@@ -73,6 +83,7 @@ class HTTPClient(object):
                 # status = status + chr(8) * (len(status) + 1)
                 # sys.stdout.write(status,)
 
+        return filename
 
 class Agent(object):
     def __init__(self, name):
@@ -80,39 +91,50 @@ class Agent(object):
         self.app_path = os.path.join(Config.env.get('apps_path'), self.name)
         self.log_path = os.path.join(Config.env.get('logs_path'), self.name)
         self.script_file = os.path.join(self.app_path, 'start.py')
-        self.stdout_file = os.path.join(self.log_path, 'stdout.log')
-        self.stderr_file = os.path.join(self.log_path, 'stderr.log')
-        self.pid_file = os.path.join(self.log_path, 'server.pid')
+
         if not os.path.isdir(self.app_path):
             os.makedirs(self.app_path)
         if not os.path.isdir(self.log_path):
             os.makedirs(self.log_path)
 
-    def download(self, url):
-        HTTPClient.download(url, self.app_path)
-        # unzip
-
     def fetch(self, url):
-        thread = threading.Thread(
-            target = self.download,
-            args=(url,),
-        )
-        thread.start()
+        # Delete everything reachable from the directory named in self.app_path,
+        # assuming there are no symbolic links.
+        # CAUTION:  This is dangerous!  For example, if self.app_path == '/', it
+        # could delete all your disk files.
+        for root, dirs, files in os.walk(self.app_path, topdown=False):
+            for name in files:
+                os.remove(os.path.join(root, name))
+            for name in dirs:
+                os.rmdir(os.path.join(root, name))
+
+        # stream download
+        filename = HTTPClient.download(url, self.app_path)
+
+        # unzip
+        with zipfile.ZipFile(filename, 'r') as z:
+            z.extractall(self.app_path)
 
     def start(self, port):
+        stdout_file = os.path.join(self.log_path, '{0}.stdout.log'.format(port))
+        stderr_file = os.path.join(self.log_path, '{0}.stderr.log'.format(port))
+        pid_file = os.path.join(self.log_path, '{0}.pid'.format(port))
+
         kwargs = {'script': self.script_file, 'port': port}
         cmd = 'python {0[script]} --port={0[port]}'.format(kwargs)
         proc = subprocess.Popen(cmd, shell=True,
-                                stdout=open(self.stdout_file, 'w'),
-                                stderr=open(self.stderr_file, 'a'),
+                                stdout=open(stdout_file, 'w'),
+                                stderr=open(stderr_file, 'a'),
                                 preexec_fn=os.setpgrp)
-        with open(self.pid_file, 'wb') as fout:
+        with open(pid_file, 'wb') as fout:
             fout.write(str(proc.pid))
         proc.communicate()
 
     def stop(self, port):
+        pid_file = os.path.join(self.log_path, '{0}.pid'.format(port))
+
         # Kill /bin/sh -c python xx --port=xx
-        with open(self.pid_file, 'r') as fin:
+        with open(pid_file, 'r') as fin:
             val = fin.read()
             if val:
                 os.kill(int(val), signal.SIGTERM)
@@ -121,27 +143,100 @@ class Agent(object):
         proc = subprocess.Popen(cmd, shell=True)
 
     def restart(self, port):
-    	try:
+        try:
             self.stop(port)
         except:
-        	pass
+            pass
         self.start(port)
 
+    def execute(cls, name):
+        method = getattr(cls, name)
+        if not method:
+            raise Exception("Method %s not implemented" % name)
+        return method
 
-class HTTPServer(object):
-    pass
+
+class HTTPServer(SimpleHTTPServer.SimpleHTTPRequestHandler):
+    def write(self, text):
+        self.protocol_version = 'HTTP/1.1'
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain; charset=utf-8')
+        self.send_header('Content-Length', len(text))
+        self.end_headers()
+        self.wfile.write(text)
+
+    def build_body(self, code=200, msg=''):
+        return '{\"code\": \"%s\", \"msg\": \"%s\"}' % (code, msg)
+
+    def well_done(self):
+        self.write(self.build_body())
+
+    def agent_handler(self, instruct):
+        name = instruct.get('agent_name')
+        port = instruct.get('service_port')
+        action = instruct.get('agent_action')
+        link = instruct.get('package_link', '')
+
+        agent = Agent(name)
+        if action == ('fetch'):
+            agent.execute(action)(link)
+        elif action in ('start', 'stop', 'restart'):
+            agent.execute(action)(port)
+
+    def do_GET(self):
+        # logging.warning("======= GET STARTED =======")
+        # logging.warning(self.headers)
+        # SimpleHTTPServer.SimpleHTTPRequestHandler.do_GET(self)
+        self.well_done()
+
+    def do_POST(self):
+        form = cgi.FieldStorage(
+            fp=self.rfile,
+            headers=self.headers,
+            environ={'REQUEST_METHOD':'POST',
+                     'CONTENT_TYPE':self.headers['Content-Type'],
+                     })
+
+        instruct = dict()
+        for item in form.list:
+            instruct[item.name] = item.value
+        # instruct = {
+        #     'agent_name'  : 'hello',
+        #     'service_port': '8000',
+        #     'agent_action': 'start',
+        #     'package_link': 'http://127.0.0.1/packages/hello-v1.0.zip'
+        # }
+
+        try:
+           thread.start_new_thread(self.agent_handler, (instruct,))
+        except:
+           print "Error: unable to start thread"
+        
+        self.well_done()
+
 
 def main(argv):
-    agent = Agent('hello')
+    Handler = HTTPServer
+    httpd = SocketServer.TCPServer(('', AGENT_PORT), Handler)
+    print '@rochacbruno Python http server version 0.1 (for testing purposes only)'
+    print 'Serving at: http://%(interface)s:%(port)s' % dict(interface=AGENT_ADDR or 'localhost', port=AGENT_PORT)
+    httpd.serve_forever()
+
+    # agent = Agent('hello')
     # agent.fetch('http://static.ricoxie.com/robots.txt')
-    agent.restart(8080)
-    # import subprocess
-    # p = subprocess.Popen(['ls', '-a'], stdout=subprocess.PIPE, 
-    #                                    stderr=subprocess.PIPE)
-    # out, err = p.communicate()
-    # print out
+    # agent.stop(8080)
 
 if __name__ == "__main__":
     sys.exit(main(sys.argv))
 
-
+# -----------------------------------------------------------------
+# ----------------------    Test HTTPServer   ---------------------
+# -----------------------------------------------------------------
+# import requests
+# instruct = {
+#     'agent_name'  : 'hello',
+#     'service_port': '8021',
+#     'agent_action': 'stop',
+#     'package_link': 'http://static.ricoxie.com/tmp/hello-v1.0.0.zip'
+# }
+# print requests.post("http://localhost:15100", data=instruct).text
